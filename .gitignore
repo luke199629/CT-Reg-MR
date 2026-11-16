@@ -1,0 +1,4 @@
+__pycache__/
+*.pyc
+# Synthetic test data: regenerate with  python tools/make_sample_data.py sample_data
+sample_data/
