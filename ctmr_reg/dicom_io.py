@@ -52,6 +52,7 @@ class Volume:
     description: str = ""
     patient_name: str = ""
     warnings: list[str] = field(default_factory=list)
+    source_files: list[str] = field(default_factory=list)  # sorted by slice
 
     @property
     def shape_ijk(self):
@@ -228,7 +229,7 @@ def load_volume(files: list[str], progress: ProgressCB = None) -> Volume:
                   frame_of_reference_uid=str(first.get("FrameOfReferenceUID", "")),
                   description=str(first.get("SeriesDescription", "")),
                   patient_name=str(first.get("PatientName", "")),
-                  warnings=warnings)
+                  warnings=warnings, source_files=[p for p, _ in slices])
 
 
 # --------------------------------------------------------------------------- registration

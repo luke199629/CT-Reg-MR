@@ -8,13 +8,15 @@ import numpy as np
 from PySide6.QtCore import Qt, Signal, QPointF, QRectF
 from PySide6.QtGui import QAction, QColor, QFont, QImage, QPainter, QPen, QKeySequence
 from PySide6.QtWidgets import (
-    QApplication, QCheckBox, QComboBox, QDockWidget, QDoubleSpinBox, QFileDialog,
+    QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDockWidget, QDoubleSpinBox,
+    QFileDialog, QLineEdit,
     QFormLayout, QGroupBox, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QMainWindow,
     QMessageBox, QProgressDialog, QPushButton, QSlider, QSpinBox, QSplitter, QTableWidget,
     QTableWidgetItem, QVBoxLayout, QWidget, QScrollArea, QSizePolicy,
 )
 
 from .dicom_io import Registration, Volume, load_registration, load_volume, scan_folder
+from .export import derived_volume, resample_to, write_dicom_series, write_raw
 from .geometry import VIEWS, SLICE_AXIS, DisplayGrid, rigid_params, sample_plane, sample_point
 
 CT_PRESETS = {  # name: (level, width)
@@ -215,6 +217,69 @@ def _fmt(p):
     return f"({p[0]:8.1f}, {p[1]:8.1f}, {p[2]:8.1f})"
 
 
+class ExportDialog(QDialog):
+    """Choose what to export (original / registered), formats (DICOM, RAW) and destination."""
+
+    def __init__(self, fixed: str, moving: str | None, parent=None, start_dir=""):
+        super().__init__(parent)
+        self.setWindowTitle("Export")
+        self.fixed, self.moving = fixed, moving
+        lay = QVBoxLayout(self)
+        form = QFormLayout()
+
+        self.what = QComboBox()
+        if moving:
+            self.what.addItem(f"Registered {moving}  (resampled onto {fixed} grid)", "registered")
+            self.what.addItem(f"{fixed} + registered {moving}", "both")
+        self.what.addItem(f"{fixed}  (fixed image, original)", "fixed")
+        if moving:
+            self.what.addItem(f"{moving}  (original grid, no registration)", "moving")
+        form.addRow("Image:", self.what)
+
+        fmt = QHBoxLayout()
+        self.dicom_cb = QCheckBox("DICOM series"); self.dicom_cb.setChecked(True)
+        self.raw_cb = QCheckBox("RAW (.raw + .mhd header)"); self.raw_cb.setChecked(True)
+        fmt.addWidget(self.dicom_cb); fmt.addWidget(self.raw_cb); fmt.addStretch(1)
+        form.addRow("Format:", fmt)
+
+        self.raw_type = QComboBox(); self.raw_type.addItems(["float32", "int16", "uint16"])
+        self.raw_cb.toggled.connect(self.raw_type.setEnabled)
+        form.addRow("RAW data type:", self.raw_type)
+
+        self.prefix = QLineEdit(f"{moving}_reg_to_{fixed}" if moving else fixed)
+        form.addRow("Name prefix:", self.prefix)
+
+        row = QHBoxLayout()
+        self.folder = QLineEdit(start_dir)
+        b = QPushButton("Browse…")
+        b.clicked.connect(self._browse)
+        row.addWidget(self.folder, 1); row.addWidget(b)
+        form.addRow("Output folder:", row)
+        lay.addLayout(form)
+
+        note = QLabel("<small>Registered images use the matrix currently in effect (direction, inversion "
+                      "and the Apply checkbox) and keep the fixed image's geometry and Frame of "
+                      "Reference. The matrix used is saved alongside as a .txt file.</small>")
+        note.setWordWrap(True)
+        lay.addWidget(note)
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.accepted.connect(self._accept); bb.rejected.connect(self.reject)
+        lay.addWidget(bb)
+        self.resize(560, 0)
+
+    def _browse(self):
+        d = QFileDialog.getExistingDirectory(self, "Output folder", self.folder.text())
+        if d:
+            self.folder.setText(d)
+
+    def _accept(self):
+        if not (self.dicom_cb.isChecked() or self.raw_cb.isChecked()):
+            QMessageBox.warning(self, "Export", "Choose at least one format."); return
+        if not self.folder.text().strip():
+            QMessageBox.warning(self, "Export", "Choose an output folder."); return
+        self.accept()
+
+
 # =========================================================================== image composition
 def _unit(img, level, width):
     if img is None:
@@ -340,6 +405,8 @@ class MainWindow(QMainWindow):
         gl.addLayout(row)
         b = QPushButton("Load folder (auto-detect CT, MR, REG)…"); b.clicked.connect(self.load_folder)
         gl.addWidget(b)
+        b = QPushButton("Export (DICOM / RAW)…"); b.clicked.connect(self.export_dialog)
+        gl.addWidget(b)
         self.info = QLabel(); self.info.setWordWrap(True)
         self.info.setTextInteractionFlags(Qt.TextSelectableByMouse)
         gl.addWidget(self.info)
@@ -437,6 +504,9 @@ class MainWindow(QMainWindow):
                                 ("Load registration (REG)…", self.load_reg, "Ctrl+3"),
                                 ("Load folder (auto-detect)…", self.load_folder, "Ctrl+O")):
             a = QAction(text, self); a.setShortcut(QKeySequence(key)); a.triggered.connect(slot); m.addAction(a)
+        m.addSeparator()
+        a = QAction("Export (DICOM / RAW)…", self); a.setShortcut(QKeySequence("Ctrl+E"))
+        a.triggered.connect(self.export_dialog); m.addAction(a)
         m.addSeparator()
         a = QAction("Quit", self); a.setShortcut(QKeySequence("Ctrl+Q")); a.triggered.connect(self.close); m.addAction(a)
         for key, slot in (("Space", self._swap_blend), ("R", self.apply_cb.toggle), ("I", self.invert_matrix)):
@@ -621,7 +691,7 @@ class MainWindow(QMainWindow):
         path = QFileDialog.getSaveFileName(self, "Save matrix", "matrix.txt", "Text (*.txt)")[0]
         if path:
             header = f"4x4 matrix, maps points {self.direction.currentText()} (DICOM patient coords, mm)"
-            np.savetxt(path, self.matrix, fmt="%.10g", header=header)
+            np.savetxt(path, self.matrix, fmt="%.10g", header=header, encoding="utf-8")
 
     def load_matrix_txt(self):
         path = QFileDialog.getOpenFileName(self, "Load matrix", "", "Text (*.txt);;All files (*)")[0]
@@ -740,6 +810,86 @@ class MainWindow(QMainWindow):
         self.cursor = np.clip(ijk, 0, self.grid.shape - 1)
         self.render_all()
         self._on_hover(view, r, c)
+
+    # ------------------------------------------------------------------ export
+    def export_dialog(self, *_):
+        if self.grid is None:
+            QMessageBox.information(self, "Export", "Load an image first."); return
+        vols = {"CT": self.ct, "MR": self.mr}
+        fixed_name = self.grid_ref
+        moving_name = "MR" if fixed_name == "CT" else "CT"
+        if vols[moving_name] is None:
+            moving_name = None
+        start = getattr(self, "_last_export_dir", "")
+        if not start and vols[fixed_name].source_files:
+            start = os.path.dirname(os.path.dirname(vols[fixed_name].source_files[0]))
+        dlg = ExportDialog(fixed_name, moving_name, self, start)
+        if dlg.exec() != QDialog.Accepted:
+            return
+        self._last_export_dir = out = dlg.folder.text().strip()
+        try:
+            written = self._do_export(dlg.what.currentData(), fixed_name, moving_name, out,
+                                      dlg.prefix.text().strip() or "export",
+                                      dlg.dicom_cb.isChecked(), dlg.raw_cb.isChecked(),
+                                      dlg.raw_type.currentText())
+        except Exception as ex:
+            QMessageBox.critical(self, "Export failed", str(ex)); return
+        QMessageBox.information(self, "Export", "Exported to " + out + ":\n\n" + "\n".join(written))
+
+    def _do_export(self, what, fixed_name, moving_name, out, prefix, dicom, raw, raw_type):
+        vols = {"CT": self.ct, "MR": self.mr}
+        fixed = vols[fixed_name]
+        windows = {"CT": (self.ct_level.value(), self.ct_width.value()),
+                   "MR": (self.mr_level.value(), self.mr_width.value())}
+        os.makedirs(out, exist_ok=True)
+        jobs = []  # (volume, name, description, derivation)
+        if what in ("fixed", "both"):
+            jobs.append((fixed, f"{prefix}_{fixed_name}", fixed.description or fixed_name, ""))
+        if what == "moving":
+            mv = vols[moving_name]
+            jobs.append((mv, f"{prefix}_{moving_name}", mv.description or moving_name, ""))
+        written = []
+        if what in ("registered", "both"):
+            moving = vols[moving_name]
+            T_ct, T_mr = self.transforms()
+            T = T_mr if moving_name == "MR" else T_ct
+            dlg, cb = self._progress(f"Resampling {moving_name} onto {fixed_name}…")
+            try:
+                arr = resample_to(moving, fixed, T, progress=cb)
+            finally:
+                dlg.close()
+            desc = f"{moving.description or moving_name} reg to {fixed_name}"
+            applied = self.apply_cb.isChecked()
+            deriv = (f"Resampled onto {fixed_name} grid; {fixed_name}->{moving_name} patient-coordinate "
+                     f"matrix: " + " ".join(f"{v:.6g}" for v in T.ravel()) if applied else
+                     f"Resampled onto {fixed_name} grid without registration (identity).")
+            jobs.append((derived_volume(arr, fixed, moving, desc), f"{prefix}_{moving_name}_registered",
+                         desc, deriv))
+            mpath = os.path.join(out, f"{prefix}_matrix.txt")
+            np.savetxt(mpath, T, fmt="%.10g", encoding="utf-8", header=(
+                f"Matrix used for export: maps {fixed_name} (fixed) patient coords -> {moving_name} "
+                f"(moving) patient coords, mm, LPS.\nRegistration applied: {applied}. "
+                f"Table matrix maps {self.direction.currentText()}:\n" +
+                "\n".join(" ".join(f"{v:.10g}" for v in r) for r in self.matrix)))
+            written.append(mpath)
+        for n, (vol, name, desc, deriv) in enumerate(jobs):
+            if raw:
+                written += write_raw(vol, os.path.join(out, name + ".mhd"), raw_type)
+            if dicom:
+                d = os.path.join(out, name + "_DICOM")
+                # Patient/study tags from the series whose Frame of Reference the output is in.
+                tpl_vol = fixed if vol.frame_of_reference_uid == fixed.frame_of_reference_uid else vol
+                template = tpl_vol.source_files[0] if tpl_vol.source_files else None
+                dlg, cb = self._progress(f"Writing {name}…")
+                try:
+                    files = write_dicom_series(
+                        vol, d, template, desc,
+                        window=windows.get(vol.modality), series_number=9001 + n,
+                        derivation=deriv, progress=cb)
+                finally:
+                    dlg.close()
+                written.append(f"{d}  ({len(files)} files)")
+        return written
 
     def _point_rows(self, w):
         """Coordinate/value rows for a point w given in fixed-image patient coords."""
