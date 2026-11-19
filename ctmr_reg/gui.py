@@ -967,6 +967,9 @@ def main(argv=None):
     ap.add_argument("--mr", help="MR DICOM folder")
     ap.add_argument("--reg", help="DICOM spatial registration file")
     ap.add_argument("--folder", help="Folder containing CT, MR and REG (auto-detect)")
+    # Load the given data, save a screenshot + an export into DIR, write a report, and exit.
+    # Used to verify packaged builds, which have no console.
+    ap.add_argument("--self-test", metavar="DIR", help=argparse.SUPPRESS)
     args = ap.parse_args(argv)
 
     app = QApplication.instance() or QApplication(sys.argv[:1])
@@ -981,4 +984,31 @@ def main(argv=None):
         w._load_modality("MR", folder=args.mr)
     if args.reg:
         w.load_reg(path=args.reg)
+    if args.self_test:
+        return _self_test(app, w, args.self_test)
     return app.exec()
+
+
+def _self_test(app, w, out):
+    import traceback
+    os.makedirs(out, exist_ok=True)
+    lines = []
+    try:
+        app.processEvents()
+        w.grab().save(os.path.join(out, "screenshot.png"))
+        lines.append(f"CT loaded: {w.ct is not None}  MR loaded: {w.mr is not None}  "
+                     f"REG loaded: {w.reg is not None}  fixed: {w.grid_ref}")
+        if w.grid is not None:
+            moving = "MR" if w.grid_ref == "CT" else "CT"
+            moving = moving if {"CT": w.ct, "MR": w.mr}[moving] is not None else None
+            what = "both" if moving else "fixed"
+            written = w._do_export(what, w.grid_ref, moving, out, "selftest", True, True, "float32")
+            lines += ["exported:"] + written
+        lines.append("RESULT: OK")
+        code = 0
+    except Exception:
+        lines += [traceback.format_exc(), "RESULT: FAILED"]
+        code = 1
+    with open(os.path.join(out, "selftest.txt"), "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+    return code

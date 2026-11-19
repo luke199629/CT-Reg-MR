@@ -11,6 +11,18 @@ C:\Users\kl300\AppData\Local\anaconda3\envs\pytorch\python.exe run_viewer.py --f
 C:\Users\kl300\AppData\Local\anaconda3\envs\pytorch\python.exe run_viewer.py --ct CT_DIR --mr MR_DIR --reg REG.dcm
 ```
 
+### Standalone executable (Windows)
+
+```
+packaging\build_exe.bat
+```
+
+builds `dist\CT-Reg-MR.exe` with PyInstaller: one ~110 MB file, no console, no Python needed on
+the target machine. It accepts the same `--folder / --ct / --mr / --reg` arguments, and you can
+drag a data folder onto it or create a shortcut. The first launch takes a few seconds while it
+unpacks. To build with a different interpreter, run `packaging\build_exe.bat path\to\python.exe`
+(that environment needs PyInstaller, PySide6, pydicom, numpy, scipy and SimpleITK).
+
 Synthetic test data with a known transform: `python tools/make_sample_data.py sample_data`,
 then verify with `python tests/test_registration.py` and `python tests/test_export.py`.
 
