@@ -1530,10 +1530,31 @@ def _self_test(app, w, out):
         w.grab().save(os.path.join(out, "screenshot.png"))
         lines.append(f"CT loaded: {w.ct is not None}  MR loaded: {w.mr is not None}  "
                      f"REG loaded: {w.reg is not None}  fixed: {w.grid_ref}")
+        lines.append("Deformable methods: " + "; ".join(
+            f"{w.def_method.itemText(i)} [{'enabled' if w.def_method.model().item(i).isEnabled() else 'disabled'}]"
+            for i in range(w.def_method.count())))
         if w.grid is not None:
             keys = [it["key"] for it in w.export_items() if it["key"] in ("fixed", "rigid")]
             written = w._do_export(keys, out, "selftest", True, True, "float32")
             lines += ["exported:"] + written
+            # Every deformable method this build offers, run synchronously (MR -> CT).
+            if w.ct is not None and w.mr is not None:
+                from .deformable import register
+                for i in range(w.def_method.count()):
+                    if not w.def_method.model().item(i).isEnabled():
+                        continue
+                    key = w.def_method.itemData(i)
+                    T = w.t_ct2mr() if w.grid_ref == "CT" else np.linalg.inv(w.t_ct2mr())
+                    r = register(key, w.ct, w.mr, "CT", "MR", T, dict(DEFAULT_PARAMS[key]), 2.0,
+                                 name=f"#{len(w.results) + 1} {key} MR→CT")
+                    w.results.append(r)
+                    w.def_show.addItem(r.name, len(w.results) - 1)
+                    lines.append("deformable " + r.summary().replace("\n", " | "))
+                    n = len(w.results) - 1
+                    written = w._do_export([f"r{n}:warped", f"r{n}:jac"], out, "selftest", True, True, "float32")
+                    lines += ["exported:"] + written
+            ok = w.unload_all(confirm=False)
+            lines.append(f"unload_all: {ok}; CT={w.ct} MR={w.mr} REG={w.reg} grid={w.grid}")
         lines.append("RESULT: OK")
         code = 0
     except Exception:

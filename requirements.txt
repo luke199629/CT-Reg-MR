@@ -2,8 +2,10 @@ PySide6>=6.5
 pydicom>=2.4
 numpy
 scipy
-SimpleITK  # optional: decodes compressed DICOM pixel data
-# optional: deformable registration
+SimpleITK  # RAW/.mhd export; also decodes compressed DICOM pixel data
+# deformable registration (optional; missing ones are shown as 'not installed').
+# convexAdam/unigradicon pull in torch: install a CUDA torch first for GPU speed, e.g.
+#   pip install torch --index-url https://download.pytorch.org/whl/cu128
 itk-elastix
 convexAdam
 unigradicon

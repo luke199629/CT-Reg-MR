@@ -6,3 +6,4 @@ sample_data/
 build/
 dist/
 sample_data_deform/
+.venv/

@@ -13,21 +13,50 @@ C:\Users\kl300\AppData\Local\anaconda3\envs\pytorch\python.exe run_viewer.py --c
 
 ### Standalone executable (Windows)
 
+Two builds exist. **The released `CT-Reg-MR.exe` is the standard build.**
+
+| | Standard (`CT-Reg-MR.exe`) | Full (`CT-Reg-MR-full\`) |
+|---|---|---|
+| Viewer, overlay, rigid registration, export, unload | ✓ | ✓ |
+| Deformable: **elastix** (B-spline + mutual information, CPU, classical — no AI) | ✓ | ✓ |
+| Deformable: **ConvexAdam** (GPU) | ✗ | ✓ |
+| Deformable: **multiGradICON** (AI: pretrained neural network, GPU) | ✗ | ✓ |
+| Form | single ~300 MB .exe | folder of several GB (keep it together) |
+| Published as a GitHub release | yes | no — build it yourself (below) |
+
+> **The standard build does not include AI / deep-learning deformable image registration**
+> (multiGradICON) or the GPU method ConvexAdam. They need PyTorch + CUDA, which is several GB
+> — too large for a single-file exe and above GitHub's 2 GB release-file limit. In the standard
+> exe these methods are listed as "not installed". Use the full build or run from Python to get them.
+
+Both accept the same `--folder / --ct / --mr / --reg` arguments; you can also drag a data folder
+onto the exe. The single-file exe takes a few seconds to start while it unpacks.
+
+#### Build it yourself
+
+From a clone of this repository, in a Command Prompt, with Python 3.10+ on the PATH:
+
 ```
-packaging\build_exe.bat
+python -m venv .venv
+.venv\Scripts\python -m pip install torch --index-url https://download.pytorch.org/whl/cu128
+.venv\Scripts\python -m pip install -r requirements.txt pyinstaller
+packaging\build_exe.bat full .venv\Scripts\python.exe
 ```
 
-builds `dist\CT-Reg-MR.exe` with PyInstaller: one ~110 MB file, no console, no Python needed on
-the target machine. It accepts the same `--folder / --ct / --mr / --reg` arguments, and you can
-drag a data folder onto it or create a shortcut. The first launch takes a few seconds while it
-unpacks. To build with a different interpreter, run `packaging\build_exe.bat path\to\python.exe`
-(that environment needs PyInstaller, PySide6, pydicom, numpy, scipy and SimpleITK).
+That produces the **full** build: `dist\CT-Reg-MR-full\CT-Reg-MR-full.exe` (keep the whole
+`CT-Reg-MR-full` folder together; copy the folder to move it). The `cu128` index gives a CUDA build
+of PyTorch for NVIDIA GPUs; use `https://download.pytorch.org/whl/cpu` instead for a CPU-only
+machine (the GPU methods then run on the CPU, slowly).
 
-Deformable registration needs extra packages (optional; the viewer runs without them and greys
-out what's missing):
+For the **standard** build, skip the torch line and run `packaging\build_exe.bat` (optionally with
+the interpreter path as its argument) → `dist\CT-Reg-MR.exe`.
+
+Run without building — all methods, from Python (install the CUDA torch line above first for GPU speed;
+otherwise pip installs a CPU-only torch):
 
 ```
-python -m pip install itk-elastix convexAdam unigradicon
+python -m pip install -r requirements.txt
+python run_viewer.py
 ```
 
 multiGradICON downloads its pretrained weights (~280 MB, from the uniGradICON GitHub release) on
@@ -102,6 +131,6 @@ scores each method's displacement field against the ground truth.
   results are exported as .mhd displacement fields, not as DICOM Deformable Registration objects.
 - Deformable registration of CT and MR is not validated for clinical use. Check results
   (Jacobian / folding, landmarks, contours) before relying on them — see AAPM TG-132.
-- The standalone .exe includes only the viewer, rigid registration and export; deformable
-  methods need the Python environment above.
+- The standard .exe includes elastix but **not** the AI/GPU deformable methods (multiGradICON,
+  ConvexAdam); see *Standalone executable* for the full build.
 - Enhanced multi-frame DICOM is not supported (classic one-file-per-slice series only).
