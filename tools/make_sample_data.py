@@ -6,7 +6,11 @@ phantom moved by a known rigid transform. The REG file's top-level Frame of
 Reference is the CT's; it contains an identity item for the CT and an item for the
 MR whose matrix maps MR patient coords -> CT patient coords (standard DICOM REG).
 
-    python tools/make_sample_data.py [out_dir]
+    python tools/make_sample_data.py [out_dir] [--deform]
+
+With --deform the MR content additionally carries a smooth non-rigid bump (up to 8 mm,
+Gaussian, sigma 30 mm, centred on sphere A) that the rigid REG matrix cannot correct —
+use it to test deformable registration.
 """
 import os
 import sys
@@ -103,7 +107,13 @@ def write_series(out, sop, modality, study, for_uid, desc, affine, shape_ijk, va
     return series
 
 
-def main(out_dir="sample_data"):
+def bump(p, centre=(40.0, -20.0, 30.0), amp=(8.0, 4.0, 0.0), sigma=30.0):
+    """Smooth displacement (mm) in CT patient coords."""
+    d2 = ((p - np.asarray(centre)) ** 2).sum(-1, keepdims=True)
+    return np.exp(-d2 / (2 * sigma ** 2)) * np.asarray(amp)
+
+
+def main(out_dir="sample_data", deform=False):
     study = generate_uid()
     ct_for, mr_for = generate_uid(), generate_uid()
 
@@ -118,8 +128,11 @@ def main(out_dir="sample_data"):
 
     # MR: different FoR, oblique grid (rotated 5° about x), 1.2 x 1.2 x 4 mm
     A_mr = rot(0, 5) @ np.diag([1.2, 1.2, 4.0, 1.0]); A_mr[:3, 3] = [-150, -125, -120]
-    mr_fn = lambda q: ct_to_mr_intensity(phantom_ct(
-        (np.concatenate([q, np.ones(q.shape[:-1] + (1,))], -1) @ M_mr2ct.T)[..., :3]))
+    def mr_fn(q):
+        p = (np.concatenate([q, np.ones(q.shape[:-1] + (1,))], -1) @ M_mr2ct.T)[..., :3]
+        if deform:
+            p = p + bump(p)
+        return ct_to_mr_intensity(phantom_ct(p))
     write_series(os.path.join(out_dir, "MR"), MR_SOP, "MR", study, mr_for, "Synthetic T1",
                  A_mr, (250, 210, 62), mr_fn, intercept=0)
 
@@ -146,4 +159,5 @@ def main(out_dir="sample_data"):
 
 
 if __name__ == "__main__":
-    main(*sys.argv[1:])
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    main(*(args or ["sample_data"]), deform="--deform" in sys.argv)

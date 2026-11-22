@@ -86,14 +86,38 @@ def write_raw(vol: Volume, path_mhd: str, dtype: str = "float32") -> list[str]:
     return [base + ".mhd", base + ".raw"]
 
 
+def write_raw_vector(field: np.ndarray, affine: np.ndarray, path_mhd: str) -> list[str]:
+    """Write a [k,j,i,3] vector field (e.g. displacement in mm, LPS) as float32 .raw + .mhd.
+
+    Components are interleaved per voxel (x,y,z). Geometry comes from *affine* (voxel -> LPS mm).
+    A displacement field in this form loads in 3D Slicer / ITK as a grid transform.
+    """
+    import SimpleITK as sitk
+
+    base = os.path.splitext(path_mhd)[0]
+    img = sitk.GetImageFromArray(np.ascontiguousarray(field.astype(np.float32)), isVector=True)
+    sp = np.linalg.norm(affine[:3, :3], axis=0)
+    img.SetSpacing([float(v) for v in sp])
+    img.SetOrigin([float(v) for v in affine[:3, 3]])
+    img.SetDirection([float(v) for v in (affine[:3, :3] / sp).ravel()])
+    sitk.WriteImage(img, base + ".mhd", useCompression=False)
+    return [base + ".mhd", base + ".raw"]
+
+
 # --------------------------------------------------------------------------- DICOM
 def _int_encoding(arr: np.ndarray):
-    """Choose int16 storage + RescaleSlope/Intercept that represent *arr*."""
+    """Choose int16 storage + RescaleSlope/Intercept that represent *arr*.
+
+    Integer-valued data that fits int16 is stored as-is (slope 1). Anything else (resampled
+    intensities, Jacobian maps, …) is scaled to use the int16 range for maximum precision.
+    """
     lo, hi = float(np.nanmin(arr)), float(np.nanmax(arr))
-    if lo >= -32768 and hi <= 32767:
+    sample = arr.ravel()[:: max(1, arr.size // 200000)]
+    integer = np.all(np.abs(sample - np.round(sample)) < 1e-3)
+    if integer and lo >= -32768 and hi <= 32767:
         return 1.0, 0.0
-    slope = max(hi - lo, 1e-6) / 65000.0
     intercept = (hi + lo) / 2.0
+    slope = max(hi - lo, 1e-6) / 65000.0
     return slope, intercept
 
 

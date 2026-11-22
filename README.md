@@ -23,12 +23,27 @@ drag a data folder onto it or create a shortcut. The first launch takes a few se
 unpacks. To build with a different interpreter, run `packaging\build_exe.bat path\to\python.exe`
 (that environment needs PyInstaller, PySide6, pydicom, numpy, scipy and SimpleITK).
 
+Deformable registration needs extra packages (optional; the viewer runs without them and greys
+out what's missing):
+
+```
+python -m pip install itk-elastix convexAdam unigradicon
+```
+
+multiGradICON downloads its pretrained weights (~280 MB, from the uniGradICON GitHub release) on
+first use into `%LOCALAPPDATA%\ctmr_reg\weights`. The GPU methods use CUDA when available.
+
 Synthetic test data with a known transform: `python tools/make_sample_data.py sample_data`,
 then verify with `python tests/test_registration.py` and `python tests/test_export.py`.
+For deformable registration, `python tools/make_sample_data.py sample_data_deform --deform` adds a
+known smooth non-rigid bump on top of the rigid transform; `python tests/test_deformable.py`
+scores each method's displacement field against the ground truth.
 
 ## Features
 - **Loading**: CT folder, MR folder, REG file — or one folder with everything (auto-detected by
   Modality / SOP Class, recursive). If a folder holds several series you are asked which one.
+  *Unload all* (`Ctrl+W`) clears CT, MR, REG, the matrix and deformable results to start the next
+  case (it asks first if there are deformable results; window/level and display settings stay).
 - **Overlay slider** (bottom): 0 = CT only … 100 = MR only. `Space` flips the emphasis.
   Modes: gray blend, color fusion (MR hot), magenta/green, checkerboard.
 - **Layout**: 2×2 — axial (top-left), coordinates panel (top-right), coronal (bottom-left),
@@ -44,22 +59,49 @@ then verify with `python tests/test_registration.py` and `python tests/test_expo
   - *Fixed image*: CT (MR resampled onto CT) or MR (CT resampled onto MR).
   - *Invert matrix*, *Reset to file*, *Identity*; the matrix table is editable; save/load as text.
   - `R` toggles registration on/off, `I` inverts.
-- **Export** (`Ctrl+E` or the *Export (DICOM / RAW)…* button):
-  - *Image*: registered moving image (resampled onto the fixed image's native voxel grid with the
-    matrix currently in effect), fixed + registered moving, the fixed image alone, or the moving
-    image on its original grid.
+- **Deformable registration** (panel under *Registration*), starting from the rigid matrix in effect:
+  - *Direction*: deform MR → CT (CT fixed) or CT → MR (MR fixed).
+  - *Method*:
+    - **elastix** — B-spline, Advanced Mattes mutual information + bending-energy penalty (CPU).
+    - **ConvexAdam** — MIND-SSC features, coupled convex search + Adam (Siebert & Heinrich), GPU.
+    - **multiGradICON** — pretrained multimodal network + instance optimisation with MIND, GPU.
+  - Runs on an isotropic working grid (default 2 mm) in the fixed image's orientation, in the
+    background (the window stays usable). Method parameters are editable; hover for hints.
+  - *Show*: switch the views between *Rigid only* and any result; the fixed image follows the
+    result. The coordinates panel then shows the local displacement u and the deformed mapping.
+  - Each result reports run time, |u| statistics and the Jacobian determinant range / % folding.
+  - *Overlay on views*: colour the displayed result's **Jacobian determinant** (blue < 1
+    compression, white = no change, red > 1 expansion, magenta = folding J ≤ 0) or its
+    **displacement magnitude |u|** over all three views, with opacity, range (or *Auto*, from
+    the 1st–99th percentile) and a colour bar. "Transparent where unchanged" keeps the anatomy
+    visible. `J` cycles the overlay; the coordinates panel shows the Jacobian under the
+    crosshair and mouse, flagging folding.
+  - Convention: a fixed-space point x maps to the moving point `T_rigid(x + u(x))` (ITK
+    "fixed → moving" displacement, mm, LPS).
+- **Export** (`Ctrl+E` or the *Export (DICOM / RAW)…* button) — tick any combination of:
+  - the fixed image, the moving image on its own grid, the moving image rigidly registered onto
+    the fixed grid (current matrix);
+  - for every deformable result: the deformed moving image (fixed native grid), the displacement
+    field (vector .mhd/.raw), the Jacobian determinant, |u|, and the two registration inputs on the
+    working grid (fixed, and moving after rigid only).
   - *DICOM*: a new classic series (`<prefix>_…_DICOM/`) with the fixed image's geometry and Frame of
     Reference, patient/study tags from the fixed series, acquisition tags from the source series,
     `ImageType = DERIVED\SECONDARY`, and the matrix recorded in `DerivationDescription`.
   - *RAW*: `<name>.raw` (little-endian, x fastest, then y, then z) plus a `<name>.mhd` MetaImage
     header with size, spacing, origin and direction (LPS), which opens in 3D Slicer, ITK-SNAP or
     Fiji. Data type float32, int16 or uint16.
-  - For registered exports the matrix used is saved as `<prefix>_matrix.txt`.
+  - The rigid matrix used is saved alongside as a `.txt` file. Displacement fields are RAW/.mhd only
+    (they load in 3D Slicer as a grid transform).
 - **Navigation**: mouse wheel / ↑↓ / sliders = scroll slices; left click/drag = crosshair (all views
   follow); Ctrl+wheel = zoom; right or middle drag = pan; right double-click = reset view.
   The status bar shows the mm position and CT HU / MR values under the cursor.
 
 ## Limitations
-- Only matrix (rigid/affine) registrations are used; a deformable REG's vector grid is ignored
-  (only its pre/post matrices are applied, with a warning).
+- When *loading* a DICOM REG, only matrix (rigid/affine) registrations are used; a deformable REG's
+  vector grid is ignored (only its pre/post matrices are applied, with a warning). Deformable
+  results are exported as .mhd displacement fields, not as DICOM Deformable Registration objects.
+- Deformable registration of CT and MR is not validated for clinical use. Check results
+  (Jacobian / folding, landmarks, contours) before relying on them — see AAPM TG-132.
+- The standalone .exe includes only the viewer, rigid registration and export; deformable
+  methods need the Python environment above.
 - Enhanced multi-frame DICOM is not supported (classic one-file-per-slice series only).

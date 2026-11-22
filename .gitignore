@@ -5,3 +5,4 @@ sample_data/
 # PyInstaller output
 build/
 dist/
+sample_data_deform/

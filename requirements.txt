@@ -3,3 +3,7 @@ pydicom>=2.4
 numpy
 scipy
 SimpleITK  # optional: decodes compressed DICOM pixel data
+# optional: deformable registration
+itk-elastix
+convexAdam
+unigradicon
