@@ -63,7 +63,8 @@ multiGradICON downloads its pretrained weights (~280 MB, from the uniGradICON Gi
 first use into `%LOCALAPPDATA%\ctmr_reg\weights`. The GPU methods use CUDA when available.
 
 Synthetic test data with a known transform: `python tools/make_sample_data.py sample_data`,
-then verify with `python tests/test_registration.py` and `python tests/test_export.py`.
+then verify with `python tests/test_registration.py`, `python tests/test_export.py` and
+`python tests/test_manual.py` (drives the viewer's manual registration with simulated mouse drags).
 For deformable registration, `python tools/make_sample_data.py sample_data_deform --deform` adds a
 known smooth non-rigid bump on top of the rigid transform; `python tests/test_deformable.py`
 scores each method's displacement field against the ground truth.
@@ -88,6 +89,13 @@ scores each method's displacement field against the ground truth.
   - *Fixed image*: CT (MR resampled onto CT) or MR (CT resampled onto MR).
   - *Invert matrix*, *Reset to file*, *Identity*; the matrix table is editable; save/load as text.
   - `R` toggles registration on/off, `I` inverts.
+  - *Manual registration* (`M` toggles manual mode): in any view, left-drag moves the moving
+    image and Ctrl+left-drag rotates it about the crosshair; Shift+click sets the crosshair
+    (rotation centre). Buttons nudge along / about the fixed image's x, y, z axes by the chosen
+    step (mm / °). Every change goes into the matrix table, keeping its *Matrix maps* direction,
+    so it can be saved, exported or used as the starting point for deformable registration.
+    A displayed deformable result switches back to the rigid view first.
+  - Undo / redo (`Ctrl+Z` / `Ctrl+Y`) covers manual moves, table edits and the matrix buttons.
 - **Deformable registration** (panel under *Registration*), starting from the rigid matrix in effect:
   - *Direction*: deform MR → CT (CT fixed) or CT → MR (MR fixed).
   - *Method*:

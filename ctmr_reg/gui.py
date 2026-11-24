@@ -18,7 +18,8 @@ from PySide6.QtWidgets import (
 from .dicom_io import Registration, Volume, load_registration, load_volume, scan_folder
 from .deformable import DEFAULT_PARAMS, METHODS, method_installed
 from .export import derived_volume, resample_to, write_dicom_series, write_raw, write_raw_vector
-from .geometry import VIEWS, SLICE_AXIS, DisplayGrid, rigid_params, sample_plane, sample_point
+from .geometry import (VIEWS, SLICE_AXIS, DisplayGrid, axis_rotation, moving_motion, plane_rotation,
+                       rigid_params, sample_plane, sample_point)
 
 CT_PRESETS = {  # name: (level, width)
     "Soft tissue": (40, 400), "Bone": (500, 2000), "Lung": (-600, 1500),
@@ -37,10 +38,16 @@ class SliceView(QWidget):
     sliceDelta = Signal(str, int)
     clicked = Signal(str, float, float)       # view, row, col (image pixel coords)
     hovered = Signal(str, float, float)
+    # manual registration: drag the moving image (rotate=True: Ctrl held, turn about the crosshair)
+    manualPress = Signal(str, float, float, bool)
+    manualMove = Signal(str, float, float)
+    manualRelease = Signal(str)
 
     def __init__(self, view: str, parent=None):
         super().__init__(parent)
         self.view = view
+        self.manual = False
+        self._manual_drag = False
         self.image: QImage | None = None
         self.pixel_mm = (1.0, 1.0)
         self.cross = None                     # (row, col)
@@ -118,7 +125,17 @@ class SliceView(QWidget):
         elif steps:
             self.sliceDelta.emit(self.view, int(steps))
 
+    def set_manual(self, on: bool):
+        self.manual = on
+        self.setCursor(Qt.SizeAllCursor if on else Qt.ArrowCursor)
+
     def mousePressEvent(self, e):
+        if e.button() == Qt.LeftButton and self.manual and not (e.modifiers() & Qt.ShiftModifier):
+            rc = self._to_image(e.position())
+            if rc is not None:
+                self._manual_drag = True
+                self.manualPress.emit(self.view, *rc, bool(e.modifiers() & Qt.ControlModifier))
+            return
         if e.button() == Qt.LeftButton:
             self._drag = True
             self._emit_click(e.position())
@@ -129,7 +146,10 @@ class SliceView(QWidget):
         rc = self._to_image(e.position())
         if rc is not None:
             self.hovered.emit(self.view, *rc)
-        if self._drag:
+        if self._manual_drag:
+            if rc is not None:
+                self.manualMove.emit(self.view, *rc)
+        elif self._drag:
             self._emit_click(e.position())
         elif self._pan_start is not None:
             start, pan0 = self._pan_start
@@ -137,6 +157,9 @@ class SliceView(QWidget):
             self.update()
 
     def mouseReleaseEvent(self, _):
+        if self._manual_drag:
+            self._manual_drag = False
+            self.manualRelease.emit(self.view)
         self._drag = None
         self._pan_start = None
 
@@ -448,6 +471,9 @@ class MainWindow(QMainWindow):
             p.canvas.sliceDelta.connect(self._on_slice_delta)
             p.canvas.clicked.connect(self._on_click)
             p.canvas.hovered.connect(self._on_hover)
+            p.canvas.manualPress.connect(self._manual_press)
+            p.canvas.manualMove.connect(self._manual_move)
+            p.canvas.manualRelease.connect(self._manual_release)
 
         # Blend slider bar under the views
         self.blend = QSlider(Qt.Horizontal)
@@ -477,6 +503,9 @@ class MainWindow(QMainWindow):
         dock.setFeatures(QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable)
         body = QWidget()
         dl = QVBoxLayout(body)
+        # never let the scroll area squeeze the controls below their minimum (wrapped labels
+        # make its height-for-width estimate too small once data is loaded)
+        dl.setSizeConstraint(QVBoxLayout.SetMinimumSize)
 
         g = QGroupBox("Data")
         gl = QVBoxLayout(g)
@@ -534,6 +563,7 @@ class MainWindow(QMainWindow):
         fl.addLayout(row)
         self.matrix_info = QLabel(); self.matrix_info.setWordWrap(True)
         fl.addWidget(self.matrix_info)
+        fl.addWidget(self._build_manual_group())
         dl.addWidget(g)
         dl.addWidget(self._build_deform_group())
 
@@ -556,7 +586,8 @@ class MainWindow(QMainWindow):
         help_lbl = QLabel(
             "<small><b>Mouse:</b> wheel = scroll slices · left click/drag = move crosshair · "
             "Ctrl+wheel = zoom · right/middle drag = pan · right double-click = reset view<br>"
-            "<b>Keys:</b> ↑/↓ = slice · Space = swap CT/MR emphasis · R = toggle registration · I = invert</small>")
+            "<b>Keys:</b> ↑/↓ = slice · Space = swap CT/MR emphasis · R = toggle registration · I = invert · "
+            "M = manual registration · Ctrl+Z / Ctrl+Y = undo / redo matrix</small>")
         help_lbl.setWordWrap(True)
         dl.addWidget(help_lbl)
         dl.addStretch(1)
@@ -578,6 +609,156 @@ class MainWindow(QMainWindow):
             top.setSizes([half, half]); bottom.setSizes([half, half])
             h = vert.height() // 2 or 400
             vert.setSizes([h, h])
+
+    def _build_manual_group(self):
+        g = QGroupBox("Manual registration")
+        v = QVBoxLayout(g)
+        self.manual_cb = QCheckBox("Manual mode  (M)")
+        self.manual_cb.toggled.connect(self._on_manual_toggle)
+        v.addWidget(self.manual_cb)
+        # explicit lines: a word-wrapped label here under-reserves height and squashes the buttons
+        hint = QLabel("<small>Left-drag: move the moving image<br>"
+                      "Ctrl+left-drag: rotate it about the crosshair<br>"
+                      "Shift+click: set the crosshair (rotation centre)<br>"
+                      "Edits the matrix above · Ctrl+Z / Ctrl+Y: undo / redo</small>")
+        v.addWidget(hint)
+
+        form = QFormLayout()
+        self.man_tstep = QDoubleSpinBox(); self.man_tstep.setRange(0.1, 50); self.man_tstep.setValue(1.0)
+        self.man_tstep.setSingleStep(0.5); self.man_tstep.setSuffix(" mm")
+        self.man_rstep = QDoubleSpinBox(); self.man_rstep.setRange(0.1, 45); self.man_rstep.setValue(1.0)
+        self.man_rstep.setSingleStep(0.5); self.man_rstep.setSuffix(" °")
+        form.addRow("Move step:", self.man_tstep)
+        form.addRow("Rotate step:", self.man_rstep)
+        v.addLayout(form)
+
+        from PySide6.QtWidgets import QGridLayout
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(4)
+        grid.addWidget(QLabel("Move"), 0, 1, 1, 2, Qt.AlignCenter)
+        grid.addWidget(QLabel("Rotate"), 0, 3, 1, 2, Qt.AlignCenter)
+        for a, (name, tip) in enumerate((("x", "x axis: patient right → left"),
+                                         ("y", "y axis: anterior → posterior"),
+                                         ("z", "z axis: inferior → superior"))):
+            lbl = QLabel(f"<b>{name}</b>"); lbl.setToolTip(tip + " (fixed image, DICOM LPS)")
+            grid.addWidget(lbl, a + 1, 0)
+            for col, (text, kind, sign) in enumerate((("−", "t", -1), ("+", "t", 1),
+                                                      ("↺", "r", -1), ("↻", "r", 1))):
+                b = QPushButton(text); b.setMinimumHeight(24)
+                b.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+                b.setToolTip(f"{'Move' if kind == 't' else 'Rotate'} the moving image "
+                             f"{'along' if kind == 't' else 'about'} {tip}"
+                             f"{', through the crosshair' if kind == 'r' else ''}; "
+                             f"{'−' if sign < 0 else '+'} one step")
+                b.clicked.connect(lambda _=False, a=a, k=kind, s=sign: self._manual_nudge(a, k, s))
+                grid.addWidget(b, a + 1, col + 1)
+        for col in range(1, 5):
+            grid.setColumnStretch(col, 1)
+        v.addLayout(grid)
+        row = QHBoxLayout()
+        self.undo_btn = QPushButton("Undo"); self.undo_btn.clicked.connect(self.undo_matrix)
+        self.redo_btn = QPushButton("Redo"); self.redo_btn.clicked.connect(self.redo_matrix)
+        row.addWidget(self.undo_btn); row.addWidget(self.redo_btn)
+        v.addLayout(row)
+        self._undo, self._redo, self._mdrag = [], [], None
+        self._update_undo_buttons()
+        return g
+
+    # ------------------------------------------------------------------ manual registration
+    def _t_ref2moving(self) -> np.ndarray:
+        T_ct, T_mr = self.transforms()
+        return T_mr if self.grid_ref == "CT" else T_ct
+
+    def _set_t_ref2moving(self, T: np.ndarray):
+        """Store a new fixed -> moving transform in the matrix table, keeping its direction label."""
+        t_ct2mr = T if self.grid_ref == "CT" else np.linalg.inv(T)
+        self.matrix = t_ct2mr if self.direction.currentIndex() == 1 else np.linalg.inv(t_ct2mr)
+        self._write_table()
+        self.render_all()
+
+    def _manual_ready(self) -> bool:
+        if self.grid is None or self.ct is None or self.mr is None:
+            self.statusBar().showMessage("Manual registration needs both CT and MR loaded.", 5000)
+            return False
+        if self.active_result() is not None:            # adjust the rigid part, not a deformed image
+            self.def_show.setCurrentIndex(0)
+            self.statusBar().showMessage("Showing the rigid registration for manual adjustment.", 5000)
+        if not self.apply_cb.isChecked():
+            self.apply_cb.setChecked(True)
+            self.statusBar().showMessage("Registration switched on: adjusting the matrix in the table.", 5000)
+        return True
+
+    def _on_manual_toggle(self, on):
+        for p in self.panels.values():
+            p.canvas.set_manual(on)
+        if on:
+            self._manual_ready()
+
+    def _manual_press(self, view, r, c, rotate):
+        if not self._manual_ready():
+            return
+        self._push_undo()
+        s = self.grid.view_coords(view, self.grid.clamp(self.cursor))[0]
+        _, rv, cv, _ = self.grid.plane(view, s)
+        self._mdrag = dict(rotate=rotate, r0=r, c0=c, T0=self._t_ref2moving(),
+                           u=cv / np.linalg.norm(cv), v=rv / np.linalg.norm(rv),
+                           pmm=self.grid.pixel_mm(view), pivot=self.grid.world(self.cursor),
+                           pivot_rc=self.grid.view_coords(view, self.cursor)[1:])
+
+    def _manual_move(self, view, r, c):
+        d = self._mdrag
+        if d is None:
+            return
+        (pr, pc), (r0, c0) = d["pmm"], (d["r0"], d["c0"])
+        if d["rotate"]:
+            prow, pcol = d["pivot_rc"]
+            a0 = np.arctan2((r0 - prow) * pr, (c0 - pcol) * pc)
+            a1 = np.arctan2((r - prow) * pr, (c - pcol) * pc)
+            theta = (a1 - a0 + np.pi) % (2 * np.pi) - np.pi
+            M = moving_motion(plane_rotation(d["u"], d["v"], theta), d["pivot"])
+            msg = f"rotate {np.degrees(theta):+.1f}° about the crosshair"
+        else:
+            dr, dc = (r - r0) * pr, (c - c0) * pc
+            M = moving_motion(None, d["pivot"], dr * d["v"] + dc * d["u"])
+            msg = f"move {np.hypot(dr, dc):.1f} mm"
+        self._set_t_ref2moving(d["T0"] @ np.linalg.inv(M))
+        self.statusBar().showMessage(f"Manual: {msg}")
+
+    def _manual_release(self, _view):
+        self._mdrag = None
+
+    def _manual_nudge(self, axis, kind, sign):
+        if not self._manual_ready():
+            return
+        self._push_undo()
+        e = np.eye(3)[axis]
+        if kind == "t":
+            M = moving_motion(None, (0, 0, 0), e * sign * self.man_tstep.value())
+        else:
+            M = moving_motion(axis_rotation(e, sign * self.man_rstep.value()), self.grid.world(self.cursor))
+        self._set_t_ref2moving(self._t_ref2moving() @ np.linalg.inv(M))
+
+    def _push_undo(self):
+        self._undo.append(self.matrix.copy())
+        del self._undo[:-200]
+        self._redo.clear()
+        self._update_undo_buttons()
+
+    def _update_undo_buttons(self):
+        self.undo_btn.setEnabled(bool(self._undo))
+        self.redo_btn.setEnabled(bool(self._redo))
+
+    def undo_matrix(self):
+        if self._undo:
+            self._redo.append(self.matrix.copy())
+            self.matrix = self._undo.pop()
+            self._write_table(); self._update_undo_buttons(); self.render_all()
+
+    def redo_matrix(self):
+        if self._redo:
+            self._undo.append(self.matrix.copy())
+            self.matrix = self._redo.pop()
+            self._write_table(); self._update_undo_buttons(); self.render_all()
 
     def _build_deform_group(self):
         g = QGroupBox("Deformable registration")
@@ -872,7 +1053,9 @@ class MainWindow(QMainWindow):
         m.addSeparator()
         a = QAction("Quit", self); a.setShortcut(QKeySequence("Ctrl+Q")); a.triggered.connect(self.close); m.addAction(a)
         for key, slot in (("Space", self._swap_blend), ("R", self.apply_cb.toggle), ("I", self.invert_matrix),
-                          ("J", self._cycle_overlay)):
+                          ("J", self._cycle_overlay), ("M", self.manual_cb.toggle),
+                          ("Ctrl+Z", self.undo_matrix), ("Ctrl+Y", self.redo_matrix),
+                          ("Ctrl+Shift+Z", self.redo_matrix)):
             a = QAction(self); a.setShortcut(QKeySequence(key)); a.triggered.connect(slot); self.addAction(a)
 
     # ------------------------------------------------------------------ loading
@@ -1043,15 +1226,21 @@ class MainWindow(QMainWindow):
         if self._updating_table:
             return
         try:
-            self.matrix[item.row(), item.column()] = float(item.text())
+            val = float(item.text())
         except ValueError:
             self._write_table(); return
+        if val == self.matrix[item.row(), item.column()]:
+            return
+        self._push_undo()
+        self.matrix[item.row(), item.column()] = val
         self._refresh_matrix_info()
         self.render_all()
 
     def invert_matrix(self):
         try:
-            self.matrix = np.linalg.inv(self.matrix)
+            inv = np.linalg.inv(self.matrix)
+            self._push_undo()
+            self.matrix = inv
         except np.linalg.LinAlgError:
             QMessageBox.warning(self, "Invert", "Matrix is singular."); return
         self._write_table()
@@ -1060,11 +1249,13 @@ class MainWindow(QMainWindow):
 
     def reset_matrix(self):
         if self.file_matrix is not None:
+            self._push_undo()
             self.matrix = self.file_matrix.copy()
             self.direction.setCurrentIndex(0)
             self._write_table(); self.render_all()
 
     def identity_matrix(self):
+        self._push_undo()
         self.matrix = np.eye(4); self._write_table(); self.render_all()
 
     def save_matrix(self):
@@ -1081,6 +1272,7 @@ class MainWindow(QMainWindow):
             m = np.loadtxt(path).reshape(4, 4)
         except Exception as ex:
             QMessageBox.critical(self, "Load matrix", str(ex)); return
+        self._push_undo()
         self.matrix = m; self._write_table(); self.apply_cb.setChecked(True); self.render_all()
 
     def _refresh_matrix_info(self):
@@ -1130,6 +1322,8 @@ class MainWindow(QMainWindow):
         self.apply_cb.blockSignals(True); self.apply_cb.setChecked(False); self.apply_cb.blockSignals(False)
         self.direction.blockSignals(True); self.direction.setCurrentIndex(0); self.direction.blockSignals(False)
         self.reference.blockSignals(True); self.reference.setCurrentIndex(0); self.reference.blockSignals(False)
+        self.manual_cb.setChecked(False)
+        self._undo.clear(); self._redo.clear(); self._mdrag = None; self._update_undo_buttons()
         self._write_table()
         # deformable results
         self.results = []

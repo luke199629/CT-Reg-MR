@@ -129,3 +129,34 @@ def rigid_params(M: np.ndarray):
     else:
         rx = np.arctan2(-R[1, 2], R[1, 1]); ry = np.arctan2(-R[2, 0], sy); rz = 0.0
     return t, np.degrees([rx, ry, rz]), float(np.linalg.det(R))
+
+
+# ---- manual (interactive) rigid adjustment
+def axis_rotation(axis, deg: float) -> np.ndarray:
+    """3x3 rotation by *deg* about *axis* (right-hand rule)."""
+    a = np.asarray(axis, float)
+    a = a / np.linalg.norm(a)
+    t = np.radians(deg)
+    K = np.array([[0, -a[2], a[1]], [a[2], 0, -a[0]], [-a[1], a[0], 0]])
+    return np.eye(3) + np.sin(t) * K + (1 - np.cos(t)) * (K @ K)
+
+
+def plane_rotation(u, v, theta: float) -> np.ndarray:
+    """3x3 rotation by *theta* (rad) in the plane of orthonormal u, v, turning u toward v."""
+    u, v = np.asarray(u, float), np.asarray(v, float)
+    P = np.outer(u, u) + np.outer(v, v)
+    return np.eye(3) + np.sin(theta) * (np.outer(v, u) - np.outer(u, v)) + (np.cos(theta) - 1) * P
+
+
+def moving_motion(R=None, pivot=(0, 0, 0), d=(0, 0, 0)) -> np.ndarray:
+    """4x4 motion of the *displayed* moving image in fixed coords: x -> R (x - pivot) + pivot + d.
+
+    With T mapping fixed -> moving coords, the adjusted transform is ``T @ inv(motion)``: a feature
+    that was displayed at x is then displayed at motion(x).
+    """
+    R = np.eye(3) if R is None else np.asarray(R, float)
+    c = np.asarray(pivot, float)
+    M = np.eye(4)
+    M[:3, :3] = R
+    M[:3, 3] = c - R @ c + np.asarray(d, float)
+    return M
